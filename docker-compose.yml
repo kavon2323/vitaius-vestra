@@ -1,0 +1,33 @@
+version: '3.8'
+
+services:
+  redis:
+    image: redis:7
+    container_name: redis
+    ports:
+      - "6379:6379"
+
+  server:
+    build: ./server
+    container_name: sisters_server
+    env_file:
+      - ./server/.env
+    ports:
+      - "8000:8000"
+    depends_on:
+      - redis
+    volumes:
+      - ./server:/app
+    command: uvicorn api:app --host 0.0.0.0 --port 8000 --reload
+
+  worker:
+    build: ./worker
+    container_name: sisters_worker
+    depends_on:
+      - redis
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      BLENDER_PATH: /usr/local/blender/blender
+    volumes:
+      - ./headless:/app/headless
+      - ./blender_addon:/app/blender_addon
