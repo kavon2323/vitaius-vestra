@@ -8,6 +8,15 @@ from rq import Queue
 load_dotenv()
 app = FastAPI()
 
+from fastapi.middleware.cors import CORSMiddleware
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"], 
+    allow_methods=["*"], 
+    allow_headers=["*"]
+)
+
 s3 = boto3.client("s3", region_name=os.getenv("AWS_REGION"))
 BUCKET = os.getenv("S3_BUCKET")
 IN_PREFIX = os.getenv("S3_INPUT_PREFIX","inputs/")
