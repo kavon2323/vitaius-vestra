@@ -1,64 +1,59 @@
-import os, uuid, zipfile, io
-from dotenv import load_dotenv
-from fastapi import FastAPI, UploadFile, HTTPException
-from fastapi.responses import JSONResponse
-import boto3, redis
-from rq import Queue
+# server/api.py
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+import os
+import subprocess
+import shlex
 
-load_dotenv()
-app = FastAPI()
+BRAND_NAME = os.getenv("BRAND_NAME", "Vitaius")
+PRODUCT_NAME = os.getenv("PRODUCT_NAME", "Vestra Forms")
 
-from fastapi.middleware.cors import CORSMiddleware
+# Path assumptions (repo layout)
+BLENDER_BIN = os.getenv("BLENDER_BIN", "blender")  # rely on PATH or set absolute
+PROCESS_SCRIPT = os.getenv("PROCESS_SCRIPT", "headless/process_cli.py")
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"], 
-    allow_methods=["*"], 
-    allow_headers=["*"]
+app = FastAPI(
+    title="Vitaius API",
+    description=f"Backend for {PRODUCT_NAME} scanning, mirroring, and fulfillment",
+    version="1.0.0",
 )
 
-s3 = boto3.client("s3", region_name=os.getenv("AWS_REGION"))
-BUCKET = os.getenv("S3_BUCKET")
-IN_PREFIX = os.getenv("S3_INPUT_PREFIX","inputs/")
-OUT_PREFIX = os.getenv("S3_OUTPUT_PREFIX","outputs/")
-r = redis.from_url(os.getenv("REDIS_URL"))
-q = Queue(connection=r)
+class LocalRunRequest(BaseModel):
+    input: str
+    chest_wall: str | None = None
+    axis: str = "X"
+    base_offset_mm: float = 2.0
+    mold_padding_mm: float = 10.0
+    out_prosthetic: str | None = None
+    out_mold: str | None = None
 
-@app.post("/upload")
-async def upload(zipfile_in: UploadFile):
-    case_id = f"case_{uuid.uuid4().hex[:8]}"
-    data = await zipfile_in.read()
+@app.get("/healthz")
+def healthz():
+    return {"ok": True, "brand": BRAND_NAME, "product": PRODUCT_NAME}
 
-    # quick manifest check
-    zf = zipfile.ZipFile(io.BytesIO(data))
-    if "manifest.json" not in zf.namelist():
-        raise HTTPException(400, "manifest.json missing")
+@app.post("/run-local")
+def run_local(req: LocalRunRequest):
+    """DEV ONLY: run Blender headless locally to verify end-to-end."""
+    if not os.path.isfile(req.input):
+        raise HTTPException(400, f"Input not found: {req.input}")
 
-    key = f"{IN_PREFIX}{case_id}.zip"
-    s3.put_object(Bucket=BUCKET, Key=key, Body=data)
+    cmd = [
+        BLENDER_BIN, "-b", "-P", PROCESS_SCRIPT, "--",
+        "--input", req.input,
+        "--axis", req.axis,
+        "--base_offset_mm", str(req.base_offset_mm),
+        "--mold_padding_mm", str(req.mold_padding_mm),
+    ]
+    if req.chest_wall:
+        cmd += ["--chest_wall", req.chest_wall]
+    if req.out_prosthetic:
+        cmd += ["--out_prosthetic", req.out_prosthetic]
+    if req.out_mold:
+        cmd += ["--out_mold", req.out_mold]
 
-    # enqueue job (worker pulls from S3, runs blender, pushes outputs)
-    job = q.enqueue("worker.process_case", case_id)
-    return {"case_id": case_id, "job_id": job.id, "status": "queued"}
-
-@app.get("/status/{job_id}")
-def status(job_id: str):
-    from rq.job import Job
     try:
-        job = Job.fetch(job_id, connection=r)
-    except Exception:
-        raise HTTPException(404, "Unknown job")
-    return {"status": job.get_status(), "meta": job.meta}
-
-def _signed(key, expires=3600):
-    return s3.generate_presigned_url("get_object", Params={"Bucket": BUCKET, "Key": key}, ExpiresIn=expires)
-
-@app.get("/download/{case_id}")
-def download_links(case_id: str):
-    prosth_key = f"{OUT_PREFIX}{case_id}_prosthesis.stl"
-    mold_key   = f"{OUT_PREFIX}{case_id}_mold.stl"
-    # we return links regardless; client can 404 if not yet present
-    return {
-        "prosthetic_url": _signed(prosth_key),
-        "mold_url": _signed(mold_key)
-    }
+        print("Running:", " ".join(shlex.quote(c) for c in cmd))
+        out = subprocess.check_output(cmd, stderr=subprocess.STDOUT, text=True)
+        return {"ok": True, "log": out}
+    except subprocess.CalledProcessError as e:
+        raise HTTPException(500, f"Blender failed:\n{e.output}")
