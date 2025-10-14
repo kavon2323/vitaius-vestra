@@ -21,3 +21,5 @@ COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
 CMD ["/entrypoint.sh"]
+LABEL org.opencontainers.image.title="vitaius-worker"
+LABEL org.opencontainers.image.description="Vitaius – Vestra Forms headless Blender worker"
