@@ -522,3 +522,19 @@ def unregister():
 
 if __name__ == "__main__":
     register()
+
+bl_info = {
+    "name": "Vitaius – Vestra Designer",
+    "author": "Vitaius",
+    "version": (1, 8, 0),
+    "blender": (3, 6, 0),
+    "location": "N-Panel > Vitaius",
+    "description": "Mirror & base-fitting tools for Vestra Forms custom prosthetics",
+    "category": "3D View",
+}
+
+class VESTRA_PT_panel(bpy.types.Panel):
+    bl_label = "Vitaius – Vestra Designer"
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = "Vitaius"   # sidebar tab name
