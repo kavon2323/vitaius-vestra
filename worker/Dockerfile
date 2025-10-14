@@ -1,25 +1,33 @@
+# ---- Base: Blender headless worker (x86_64) ----
 FROM ubuntu:22.04
 
-ENV DEBIAN_FRONTEND=noninteractive
-RUN apt-get update && apt-get install -y wget xz-utils python3 python3-pip libgl1 libxrender1 libxi6 libxxf86vm1 libxfixes3 libxext6 libx11-6 libxcursor1 libxinerama1 libsm6 libice6 libxrandr2 \
+ENV DEBIAN_FRONTEND=noninteractive \
+    PIP_NO_CACHE_DIR=1
+
+# Core OS deps
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    wget curl ca-certificates gnupg2 xz-utils \
+    python3 python3-pip python3-venv \
+    libxi6 libxxf86vm1 libxfixes3 libxrender1 libxcomposite1 libasound2 \
+    libgl1 libglx-mesa0 libegl1 libsm6 libice6 libx11-6 libxext6 libxrandr2 \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Blender (headless build)
-RUN wget -qO /tmp/blender.tar.xz https://download.blender.org/release/Blender4.0/blender-4.0.2-linux-x64.tar.xz \
- && tar -xJf /tmp/blender.tar.xz -C /usr/local/ \
- && mv /usr/local/blender-4.0.2-linux-x64 /usr/local/blender \
- && rm /tmp/blender.tar.xz
-ENV BLENDER_PATH=/usr/local/blender/blender
+# Install Blender (3.6 LTS headless)
+# You can bump BLENDER_VERSION to a newer LTS if needed.
+ENV BLENDER_VERSION=3.6.15
+RUN wget -q https://download.blender.org/release/Blender$BLENDER_VERSION/\
+blender-$BLENDER_VERSION-linux-x64.tar.xz -O /tmp/blender.tar.xz && \
+    mkdir -p /opt/blender && \
+    tar -xf /tmp/blender.tar.xz -C /opt/blender --strip-components=1 && \
+    ln -s /opt/blender/blender /usr/local/bin/blender && \
+    rm -f /tmp/blender.tar.xz
 
-# Python deps
-RUN pip3 install boto3 redis rq python-dotenv
+# Python deps for your worker scripts (adjust if you add S3/Redis later)
+RUN python3 -m pip install --upgrade pip && \
+    python3 -m pip install boto3 redis psycopg2-binary
 
 WORKDIR /app
-COPY headless/ /app/headless/
-COPY server/worker.py /app/worker.py
-COPY entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
+COPY . /app
 
-CMD ["/entrypoint.sh"]
-LABEL org.opencontainers.image.title="vitaius-worker"
-LABEL org.opencontainers.image.description="Vitaius – Vestra Forms headless Blender worker"
+# Default entrypoint (can be overridden by compose)
+ENTRYPOINT ["/app/worker/entrypoint.sh"]
