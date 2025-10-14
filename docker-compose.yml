@@ -4,7 +4,7 @@ services:
   api:
     build:
       context: .
-      dockerfile: ./server/Dockerfile  # create one if you don't have it; or use image: python:3.11-slim and pip install fastapi+uvicorn
+      dockerfile: ./server/Dockerfile
     container_name: vitaius-api
     environment:
       BRAND_NAME: "Vitaius"
@@ -18,25 +18,19 @@ services:
     ports:
       - "8000:8000"
 
-  # Example “one-shot” worker. You can override INPUT/outputs with `docker compose run`.
   worker:
     build:
       context: .
-      dockerfile: ./worker/Dockerfile  # create a Dockerfile that installs Blender headless
+      dockerfile: ./worker/Dockerfile
     container_name: vitaius-worker
     environment:
       BLENDER_BIN: "blender"
       AXIS: "X"
       BASE_OFFSET_MM: "2.0"
       MOLD_PADDING_MM: "10.0"
+      # You will override INPUT/outputs at run time
     volumes:
       - ./:/app
       - ./data:/data
     working_dir: /app
     entrypoint: ["/app/worker/entrypoint.sh"]
-    # Example args (override when you run):
-    # environment:
-    #   INPUT: "/data/sample_breast.stl"
-    #   CHEST_WALL: "/data/sample_chest.stl"
-    #   OUT_PROSTHETIC: "/data/vitaius_vestra_prosthetic.stl"
-    #   OUT_MOLD: "/data/vitaius_vestra_mold.stl"
