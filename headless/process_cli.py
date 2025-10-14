@@ -1,152 +1,143 @@
 # headless/process_cli.py
-import json, sys, os, bpy
-from mathutils import Matrix, Vector
+# Run INSIDE Blender with: blender -b -P headless/process_cli.py -- <args>
 
-def import_mesh(path):
-    ext = os.path.splitext(path)[1].lower()
+import sys
+import os
+import argparse
+
+# Blender context imports
+import bpy
+
+# ─────────────────────────────────────────────────────────────────────
+# CLI
+# ─────────────────────────────────────────────────────────────────────
+parser = argparse.ArgumentParser(description="Vitaius Vestra headless processor")
+parser.add_argument("--addon_path", default="blender_addon/vitaius_vestra_designer.py",
+                    help="Path to the Vitaius Vestra Designer add-on file")
+parser.add_argument("--input", required=True, help="Path to input scan (.stl/.obj/.ply)")
+parser.add_argument("--axis", default="X", choices=["X", "Y", "Z"], help="Mirror axis (default X)")
+parser.add_argument("--midline", type=float, default=0.0, help="Midline world X/Y/Z value (used by add-on; default 0)")
+parser.add_argument("--base_offset_mm", type=float, default=2.0, help="Base comfort offset in mm")
+parser.add_argument("--mold_padding_mm", type=float, default=10.0, help="Mold padding (shell) in mm")
+parser.add_argument("--chest_wall", default="", help="Optional path to chest wall mesh to fit against")
+parser.add_argument("--out_prosthetic", default="", help="Output STL path for prosthetic")
+parser.add_argument("--out_mold", default="", help="Output STL path for mold")
+args, _ = parser.parse_known_args(sys.argv[sys.argv.index("--") + 1:] if "--" in sys.argv else [])
+
+# ─────────────────────────────────────────────────────────────────────
+# Load the Vitaius add-on module dynamically
+# ─────────────────────────────────────────────────────────────────────
+addon_abspath = bpy.path.abspath("//" + args.addon_path) if not os.path.isabs(args.addon_path) else args.addon_path
+if not os.path.isfile(addon_abspath):
+    # Try repo-relative (run from repo root)
+    addon_abspath = os.path.abspath(args.addon_path)
+if not os.path.isfile(addon_abspath):
+    raise RuntimeError(f"Add-on not found at {args.addon_path} (resolved {addon_abspath})")
+
+# Execute the add-on file so all operators/classes are registered
+bpy.ops.script.python_file_run(filepath=addon_abspath)
+
+# Ensure the scene prop group exists (the add-on's register() creates it)
+if not hasattr(bpy.types.Scene, "vvestra"):
+    raise RuntimeError("Vitaius add-on did not register. Check addon_path.")
+
+props = bpy.context.scene.vvestra
+props.mirror_axis = args.axis
+props.base_offset_mm = args.base_offset_mm
+props.mold_padding_mm = args.mold_padding_mm
+props.treat_units_as_mm = True
+
+# ─────────────────────────────────────────────────────────────────────
+# Helper: import a mesh file by extension (same as add-on)
+# ─────────────────────────────────────────────────────────────────────
+def import_scan(path):
+    p = os.path.abspath(path)
+    ext = os.path.splitext(p)[1].lower()
     if ext == ".stl":
-        bpy.ops.import_mesh.stl(filepath=path)
+        # Make sure STL import is available
+        try:
+            bpy.ops.preferences.addon_enable(module="io_mesh_stl")
+        except Exception:
+            pass
+        bpy.ops.import_mesh.stl(filepath=p)
     elif ext == ".obj":
-        bpy.ops.import_scene.obj(filepath=path)
+        bpy.ops.wm.obj_import(filepath=p)
     elif ext == ".ply":
-        bpy.ops.import_mesh.ply(filepath=path)
+        bpy.ops.wm.ply_import(filepath=p)
     else:
-        raise RuntimeError(f"Unsupported mesh: {ext}")
-    return bpy.context.selected_objects[0]
+        raise RuntimeError(f"Unsupported input extension: {ext}")
 
-def ensure_midline():
-    m = bpy.data.objects.get("Midline")
-    if not m:
-        bpy.ops.object.empty_add(type='PLAIN_AXES', location=(0,0,0))
-        m = bpy.context.active_object; m.name = "Midline"
-    return m
+# ─────────────────────────────────────────────────────────────────────
+# Fresh scene
+# ─────────────────────────────────────────────────────────────────────
+bpy.ops.wm.read_homefile(use_empty=True)
 
-def reflect_obj_x(obj, xplane):
-    T1 = Matrix.Translation(Vector((-xplane,0,0)))
-    SX = Matrix.Scale(-1.0, 4, Vector((1,0,0)))
-    T2 = Matrix.Translation(Vector(( xplane,0,0)))
-    obj.matrix_world = T2 @ SX @ T1 @ obj.matrix_world
-    bpy.ops.object.transform_apply(location=False, rotation=True, scale=True)
+# Import breast
+import_scan(args.input)
+breast = bpy.context.selected_objects[0]
+bpy.context.view_layer.objects.active = breast
 
-def bbox_x(obj):
-    xs = [(obj.matrix_world @ Vector(c)).x for c in obj.bound_box]
-    return min(xs), max(xs), 0.5*(min(xs)+max(xs))
+# Optional: import chest wall
+cw_obj = None
+if args.chest_wall:
+    import_scan(args.chest_wall)
+    cw_obj = bpy.context.selected_objects[0]
+    props.chest_wall_obj = cw_obj
 
-def make_mold_from(obj, outpath, padding_m=0.01):
-    ws = [obj.matrix_world @ v.co for v in obj.data.vertices]
-    minx,maxx = min(v.x for v in ws), max(v.x for v in ws)
-    miny,maxy = min(v.y for v in ws), max(v.y for v in ws)
-    minz,maxz = min(v.z for v in ws), max(v.z for v in ws)
-    size = (maxx-minx+2*padding_m, maxy-miny+2*padding_m, maxz-minz+2*padding_m)
-    center = ((minx+maxx)/2, (miny+maxy)/2, (minz+maxz)/2)
-    bpy.ops.mesh.primitive_cube_add(size=1, location=center)
-    mold = bpy.context.active_object; mold.name = f"{obj.name}_Mold"
-    mold.scale = (size[0]/2, size[1]/2, size[2]/2)
-    bpy.ops.object.transform_apply(location=True, rotation=True, scale=True)
-    boolmod = mold.modifiers.new("Cut", 'BOOLEAN')
-    boolmod.operation = 'DIFFERENCE'; boolmod.solver = 'EXACT'; boolmod.object = obj
-    bpy.context.view_layer.objects.active = mold
-    bpy.ops.object.modifier_apply(modifier=boolmod.name)
-    bpy.ops.object.select_all(action='DESELECT'); mold.select_set(True)
+# Step 2 — Clean & Orient
+bpy.ops.vitaius.clean_orient()
+
+# Step 3 — Mirror (true object mirror)
+bpy.ops.object.select_all(action='DESELECT')
+breast.select_set(True)
+bpy.context.view_layer.objects.active = breast
+bpy.ops.vitaius.mirror_true()
+
+# Use the mirrored copy (name ends with _Mirrored)
+mirrored = None
+for obj in bpy.context.scene.objects:
+    if obj.name.startswith(breast.name) and obj.name.endswith("_Mirrored"):
+        mirrored = obj
+        break
+if mirrored is None:
+    # Fallback: use active
+    mirrored = bpy.context.active_object
+
+# Step 4 — Fit base if chest wall provided
+if cw_obj is not None:
+    bpy.ops.object.select_all(action='DESELECT')
+    mirrored.select_set(True)
+    bpy.context.view_layer.objects.active = mirrored
+    bpy.ops.vitaius.fit_base()
+
+# Step 5 — Export Prosthetic STL
+bpy.ops.object.select_all(action='DESELECT')
+mirrored.select_set(True)
+bpy.context.view_layer.objects.active = mirrored
+
+if args.out_prosthetic:
+    # Temporarily set a filepath property if operator supports it; otherwise the add-on writes default name.
     try:
-        bpy.ops.export_mesh.stl(filepath=outpath, use_selection=True, ascii=False)
+        bpy.ops.vitaius.export_stl('INVOKE_DEFAULT')
+        # Native exporter in the add-on writes to //vitaius_vestra_prosthetic.stl; move/rename if a custom path was passed.
+        default_out = bpy.path.abspath("//vitaius_vestra_prosthetic.stl")
+        if os.path.isfile(default_out) and os.path.abspath(args.out_prosthetic) != default_out:
+            os.replace(default_out, os.path.abspath(args.out_prosthetic))
     except Exception as e:
-        # fallback quick STL writer if export add-on disabled
-        import bmesh, struct
-        deps = bpy.context.evaluated_depsgraph_get()
-        me = mold.evaluated_get(deps).to_mesh()
-        bm = bmesh.new(); bm.from_mesh(me); bmesh.ops.triangulate(bm, faces=bm.faces[:])
-        M = mold.matrix_world; N = M.to_3x3().inverted().transposed()
-        with open(outpath,"wb") as f:
-            f.write(b"Sisters Prosthetics STL".ljust(80,b" ")); f.write(struct.pack("<I", len(bm.faces)))
-            for face in bm.faces:
-                n = (N @ face.normal).normalized(); vs = [M @ v.co for v in face.verts]
-                v1,v2,v3 = vs[0],vs[1],vs[2]
-                f.write(struct.pack("<12f", n.x,n.y,n.z, v1.x,v1.y,v1.z, v2.x,v2.y,v2.z, v3.x,v3.y,v3.z))
-                f.write(struct.pack("<H",0))
-        bm.free(); mold.evaluated_get(deps).to_mesh_clear()
+        raise RuntimeError(f"Export prosthetic failed: {e}")
+else:
+    bpy.ops.vitaius.export_stl()
 
-def main():
-    # argv: blender -b -P process_cli.py -- <case_dir> <out_prosthetic> <out_mold>
-    argv = sys.argv; sep = argv.index('--'); case_dir = argv[sep+1]
-    out_prosthetic = argv[sep+2]; out_mold = argv[sep+3]
-    mf = json.load(open(os.path.join(case_dir, "manifest.json"), "r"))
-    units = mf.get("units","mm")
-    healthy = mf.get("healthy_side","left").lower()
-    base = mf.get("base_fit", {"enabled": False})
-    base_enabled = bool(base.get("enabled", False))
-    base_offset_m = float(base.get("offset_mm", 2.0))/1000.0
-    mid = mf.get("midline", {"point":[0,0,0], "normal":[1,0,0]})
-    midx = float(mid["point"][0])
-
-    bpy.context.scene.unit_settings.system='METRIC'
-    bpy.context.scene.unit_settings.scale_length = 0.001 if units=="mm" else 1.0
-
-    breast_path = os.path.join(case_dir, "mesh_breast.stl")
-    chest_path  = os.path.join(case_dir, "mesh_chestwall.stl")
-    breast = import_mesh(breast_path); breast.name="Breast"
-    chest = None
-    if os.path.exists(chest_path):
-        chest = import_mesh(chest_path); chest.name="ChestWall"
-
-    # origin + clean transforms
-    for o in [breast, chest] if chest else [breast]:
-        if not o: continue
-        bpy.ops.object.select_all(action='DESELECT')
-        o.select_set(True); bpy.context.view_layer.objects.active = o
-        bpy.ops.object.transform_apply(location=False, rotation=True, scale=True)
-        bpy.ops.object.origin_set(type='ORIGIN_GEOMETRY', center='MEDIAN')
-
-    midline = ensure_midline(); midline.location = (midx,0,0)
-
-    # Ensure breast is on the stated healthy side
-    _,_,cx = bbox_x(breast)
-    is_left = cx < midx
-    if (healthy=="left") != is_left:
-        reflect_obj_x(breast, midx)
-
-    # Duplicate and reflect to opposite side
-    bpy.ops.object.select_all(action='DESELECT'); breast.select_set(True)
-    bpy.ops.object.duplicate(); mir = bpy.context.active_object; mir.name="Breast_Mirrored"
-    breast.hide_set(True)
-    reflect_obj_x(mir, midx)
-
-    # Optional base fit to chest
-    if base_enabled and chest:
-        # negative solidify (comfort)
-        solid = mir.modifiers.new("Comfort", 'SOLIDIFY')
-        solid.thickness = -base_offset_m; solid.offset=0.0
-        try: bpy.ops.object.modifier_apply(modifier=solid.name)
-        except: pass
-        # boolean fit
-        boolm = mir.modifiers.new("Fit", 'BOOLEAN')
-        boolm.operation='DIFFERENCE'; boolm.solver='FAST'; boolm.object=chest
-        try: bpy.ops.object.modifier_apply(modifier=boolm.name)
-        except:
-            boolm.solver='EXACT'; bpy.ops.object.modifier_apply(modifier=boolm.name)
-
-    # Export prosthetic
-    bpy.ops.object.select_all(action='DESELECT'); mir.select_set(True)
+# Step 6 — Export Mold STL
+if args.out_mold:
     try:
-        bpy.ops.export_mesh.stl(filepath=out_prosthetic, use_selection=True, ascii=False)
-    except Exception:
-        # fallback writer
-        import bmesh, struct
-        deps = bpy.context.evaluated_depsgraph_get()
-        me = mir.evaluated_get(deps).to_mesh()
-        bm = bmesh.new(); bm.from_mesh(me); bmesh.ops.triangulate(bm, faces=bm.faces[:])
-        M = mir.matrix_world; N = M.to_3x3().inverted().transposed()
-        with open(out_prosthetic,"wb") as f:
-            f.write(b"Sisters Prosthetics STL".ljust(80,b" ")); f.write(struct.pack("<I", len(bm.faces)))
-            for face in bm.faces:
-                n=(N@face.normal).normalized(); vs=[M@v.co for v in face.verts]
-                v1,v2,v3=vs[0],vs[1],vs[2]
-                f.write(struct.pack("<12f", n.x,n.y,n.z, v1.x,v1.y,v1.z, v2.x,v2.y,v2.z, v3.x,v3.y,v3.z))
-                f.write(struct.pack("<H",0))
-        bm.free(); mir.evaluated_get(deps).to_mesh_clear()
+        bpy.ops.vitaius.export_mold('INVOKE_DEFAULT')
+        default_mold = bpy.path.abspath("//vitaius_vestra_mold.stl")
+        if os.path.isfile(default_mold) and os.path.abspath(args.out_mold) != default_mold:
+            os.replace(default_mold, os.path.abspath(args.out_mold))
+    except Exception as e:
+        raise RuntimeError(f"Export mold failed: {e}")
+else:
+    bpy.ops.vitaius.export_mold()
 
-    # Export mold
-    make_mold_from(mir, out_mold, padding_m=0.01)  # 10 mm padding
-
-if __name__ == "__main__":
-    main()
+print("Vitaius Vestra headless process: DONE")
