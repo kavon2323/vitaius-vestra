@@ -1,40 +1,19 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# ENV you can pass at runtime:
-# BLENDER_BIN=/usr/bin/blender
-# INPUT=/data/input.stl
-# CHEST_WALL=/data/chestwall.stl   (optional)
-# AXIS=X
-# BASE_OFFSET_MM=2.0
-# MOLD_PADDING_MM=10.0
-# OUT_PROSTHETIC=/data/vitaius_vestra_prosthetic.stl
-# OUT_MOLD=/data/vitaius_vestra_mold.stl
-
-BLENDER_BIN="${BLENDER_BIN:-blender}"
-AXIS="${AXIS:-X}"
-BASE_OFFSET_MM="${BASE_OFFSET_MM:-2.0}"
-MOLD_PADDING_MM="${MOLD_PADDING_MM:-10.0}"
-
-if [[ -z "${INPUT:-}" ]]; then
-  echo "ERROR: INPUT not set"; exit 1
+# If INPUT is provided, run one-shot (useful for manual tests)
+if [[ -n "${INPUT:-}" ]]; then
+  echo "[oneshot] Running single job with INPUT=$INPUT"
+  exec blender -b -P headless/process_cli.py -- \
+    --input "${INPUT}" \
+    ${CHEST_WALL:+--chest_wall "${CHEST_WALL}"} \
+    --axis "${AXIS:-X}" \
+    --base_offset_mm "${BASE_OFFSET_MM:-2.0}" \
+    --mold_padding_mm "${MOLD_PADDING_MM:-10.0}" \
+    ${OUT_PROSTHETIC:+--out_prosthetic "${OUT_PROSTHETIC}"} \
+    ${OUT_MOLD:+--out_mold "${OUT_MOLD}"}
 fi
 
-CMD=( "$BLENDER_BIN" -b -P headless/process_cli.py -- \
-      --input "$INPUT" \
-      --axis "$AXIS" \
-      --base_offset_mm "$BASE_OFFSET_MM" \
-      --mold_padding_mm "$MOLD_PADDING_MM" )
-
-if [[ -n "${CHEST_WALL:-}" ]]; then
-  CMD+=( --chest_wall "$CHEST_WALL" )
-fi
-if [[ -n "${OUT_PROSTHETIC:-}" ]]; then
-  CMD+=( --out_prosthetic "$OUT_PROSTHETIC" )
-fi
-if [[ -n "${OUT_MOLD:-}" ]]; then
-  CMD+=( --out_mold "$OUT_MOLD" )
-fi
-
-echo "Running: ${CMD[*]}"
-exec "${CMD[@]}"
+# Otherwise run the Redis loop
+echo "[loop] Starting Vitaius worker loop"
+exec python3 /app/worker/runner.py
